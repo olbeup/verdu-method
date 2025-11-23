@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="The Verdú Method: Native technique to query multiple Firebird 2.5 databases from a single PROCEDURE, without external APIs. Discovered by Salvador Verdú in 2023.">
+<meta name="author" content="Salvador Verdú">
+<meta name="keywords" content="Firebird 2.5, EXECUTE STATEMENT ON EXTERNAL, cross-database, stored procedure, remote, Spain, China, Salvador Verdú">
+<title>The Verdú Method — Firebird 2.5: Native Multi-DB Queries</title>
+<style>
+  body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; margin: 0; padding: 20px; color: #333; background-color: #fafafa; }
+  .container { max-width: 900px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+  h1, h2, h3 { color: #c00; font-weight: 600; } /* Firebird red */
+  h1 { text-align: center; border-bottom: 2px solid #c00; padding-bottom: 15px; margin-top: 0; }
+  .author-banner { 
+    text-align: center; 
+    background: #f8f8f8; 
+    padding: 12px; 
+    margin: -30px -30px 25px -30px; 
+    border-bottom: 1px solid #eee;
+    font-weight: bold;
+  }
+  pre { 
+    background-color: #f9f9f9; 
+    padding: 16px; 
+    border-left: 4px solid #c00; 
+    overflow-x: auto; 
+    border-radius: 4px;
+    font-size: 14px;
+  }
+  code { font-family: Consolas, 'Courier New', monospace; }
+  hr { border: 0; border-top: 1px solid #eee; margin: 35px 0; }
+  .footer { text-align: center; margin-top: 40px; color: #777; font-size: 0.9em; }
+  @media (max-width: 600px) {
+    .container { padding: 15px; }
+    h1 { font-size: 22px; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<div class="author-banner">
+  🇪🇸 Author: <strong>Salvador Verdú</strong> • Santiago de la Ribera, 30720, Spain • 🔍 Discovered in <strong>2023</strong>
+</div>
+
+<h1>The Verdú Method<br><small>Firebird 2.5: Native Multi-Database Queries Without External APIs</small></h1>
+
+<hr>
+
+<h2>Chapter 1: Introduction to the Technique</h2>
+<p>This document describes an advanced technique developed by Salvador for Firebird 2.5 that allows <strong>querying and joining data from multiple databases</strong> (local and remote) from a single PROCEDURE, using only native engine features — no external libraries, UDFs, or APIs.</p>
+
+<h3>1.1 Purpose</h3>
+<p>The goal of this technique is to enable real-time consolidation of data from multiple Firebird installations (e.g., pharmacies or branches) and combine them with local data for analysis, reporting, or statistics — <strong>all from a native stored procedure</strong>.</p>
+
+<h3>1.2 Advantages</h3>
+<ul>
+<li>Query and join data across multiple databases without prior replication.</li>
+<li>Uses only native Firebird 2.5 features.</li>
+<li>Supports remote databases over TCP/IP.</li>
+<li>Robust error handling: execution continues even if one remote database is unreachable.</li>
+<li>Scalable: add more remote databases by simply inserting rows into a configuration table (e.g. <code>RMT_FARMACIAS</code>).</li>
+</ul>
+
+<h3>1.3 Known Limitations</h3>
+<ul>
+<li>Each remote database must be reachable via IP and open port (default: 3050).</li>
+<li>All databases must be Firebird 2.5 compatible.</li>
+<li>Requires correct user/permission setup (e.g. <code>SYSDBA</code> or a user with table access).</li>
+<li>Execution time increases with the number of remote databases.</li>
+<li><strong>Firebird requires all fields to be declared in the PROCEDURE header in advance.</strong> Unlike SQL Server, Firebird 2.5 does not support dynamic field selection — any undeclared field will cause a runtime error.</li>
+</ul>
+
+<hr>
+
+<h2>Chapter 2: Basic Remote Query Example</h2>
+<pre><code>SET TERM ^;
+
+CREATE OR ALTER PROCEDURE ArticulosRemoto
+(
+  pCodigoArticulo VARCHAR(6),
+  pIPRemotaFDB VARCHAR(100)
+)
+RETURNS
+(
+  fldCodigoArticuloRMT VARCHAR(6),
+  fldStockRMT INTEGER,
+  fldErrorCNN INTEGER
+)
+AS
+  DECLARE VARIABLE lcComando VARCHAR(8192);
+BEGIN
+  lcComando =
+    'SELECT' ||
+    '    CODIGO_ARTICULO' ||
+    '    ,STOCK' ||
+    '  FROM ARTICULOS' ||
+    '  WHERE (CODIGO_ARTICULO = :pCodigoArticulo)';
+
+  EXECUTE STATEMENT lcComando
+    ON EXTERNAL pIPRemotaFDB
+    AS USER "SYSDBA" PASSWORD "masterkey"
+    INTO
+      :fldCodigoArticuloRMT,
+      :fldStockRMT;
+
+  IF (fldStockRMT IS NULL) THEN
+    fldStockRMT = 0;
+
+  fldErrorCNN = 0;
+
+  SUSPEND;
+
+  WHEN ANY DO
+  BEGIN
+    fldCodigoArticuloRMT = pCodigoArticulo;
+    fldStockRMT = 0;
+    fldErrorCNN = 1;
+    SUSPEND;
+  END
+END
+^
+
+SET TERM ;^</code></pre>
+
+<p>Query from Delphi/Lazarus:</p>
+<pre><code>SELECT
+    A.CODIGO_ARTICULO,
+    A.DESC_ARTICULO,
+    A.STOCK AS STOCK_ACTUAL,
+    AR.STOCK AS STOCK_RMT
+FROM ARTICULOS AS A
+INNER JOIN ArticulosRemoto(A.CODIGO_ARTICULO, '172.18.41.91:C:\RUTA\BASE_DE_DATOS.FDB') AS AR
+  ON AR.fldCodigoArticuloRMT = A.CODIGO_ARTICULO;</code></pre>
+
+<hr>
+
+<h2>Chapter 3: Advanced Example — Multi-Month Remote Statistics</h2>
+<pre><code>SET TERM ^;
+
+CREATE OR ALTER PROCEDURE ADP_DAME_ESTADIS_ARTICLE_IP
+(
+  PCODIARTICLE VARCHAR(6),
+  PANYO INTEGER,
+  PMES INTEGER
+)
+RETURNS
+(
+  FLDCODI_ARTICLE VARCHAR(6),
+  FLDNUM_FARMACIA INTEGER,
+  FLDTOTAL_VENDES_MES_A DOUBLE PRECISION,
+  FLDTOTAL_VENDES_MES_B DOUBLE PRECISION,
+  FLDTOTAL_VENDES_MES_C DOUBLE PRECISION,
+  FLDTOTAL_VENDES_MES_D DOUBLE PRECISION,
+  FLDTOTAL_VENDES_MES_E DOUBLE PRECISION,
+  FLDTOTAL_VENDES_MES_F DOUBLE PRECISION,
+  FLDTOTAL_VENDES_MES_G DOUBLE PRECISION,
+  FLDTOTAL_VENDES_MES_H DOUBLE PRECISION,
+  FLDTOTAL_VENDES_MES_I DOUBLE PRECISION,
+  FLDTOTAL_VENDES_MES_J DOUBLE PRECISION,
+  FLDTOTAL_VENDES_MES_K DOUBLE PRECISION,
+  FLDTOTAL_VENDES_MES_L DOUBLE PRECISION,
+  FLDTOTAL_VENDES_MES_M DOUBLE PRECISION,
+  FLDP_REFERENCIA DOUBLE PRECISION,
+  FLDP_PVP DOUBLE PRECISION,
+  FLDSTOCK INTEGER,
+  FLDERROR_CNN INTEGER
+)
+AS
+DECLARE VARIABLE vTOTAL_VENDES_MES double precision;
+DECLARE VARIABLE vAnyo integer;
+DECLARE VARIABLE vMes integer;
+DECLARE VARIABLE vContador integer;
+DECLARE VARIABLE vNumFarmacia integer;
+DECLARE VARIABLE vIpFarmacia varchar(15);
+DECLARE VARIABLE vIpFarmaciaFull varchar(100);
+DECLARE VARIABLE lcComando varchar(8192);
+BEGIN
+  FOR SELECT NUM_FARMACIA, IP_FARMACIA FROM RMT_FARMACIAS
+    INTO :vNumFarmacia, :vIpFarmacia
+  DO
+  BEGIN
+    vIpFarmaciaFull = vIpFarmacia || ':C:\RUTA\DATOS\<BASE DE DATOS EXTERNA.FDB>';
+    vContador = 0;
+    vAnyo = pAnyo -1;
+    vMes = pMes;
+    fldNUM_FARMACIA = vNumFarmacia;
+    fldCODI_ARTICLE = pCodiArticle;
+    
+    WHILE (vContador <= 12) DO
+    BEGIN
+      vContador = vContador +1;
+      lcComando =
+        'SELECT ' ||
+        '    AM.P_REFERENCIA' ||
+        '    ,AM.P_PVP' ||
+        '    ,AM.STOCK' ||
+        '    ,SUM(AE.VENDES) AS TOTAL_VENDES' ||
+        '  FROM ARTICLES_ESTADISTICA AE' ||
+        '    LEFT JOIN ARTICLES_MESTRE AS AM ON (AM.CODI_ARTICLE = AE.CODI_ARTICLE)' ||
+        '  WHERE (AE.CODI_ARTICLE = ' || pCodiArticle || ')' ||
+        '        AND (AE.ANNY = ' || vAnyo || ')' ||
+        '        AND (AE.MES = ' || vMes || ')' ||
+        '  GROUP BY AM.P_REFERENCIA, AM.P_PVP, AM.STOCK';
+      
+      EXECUTE STATEMENT lcComando
+        ON EXTERNAL vIpFarmaciaFull
+        AS USER 'SYSDBA' PASSWORD 'masterkey'
+        INTO :fldP_REFERENCIA, :fldP_PVP, :fldSTOCK, :vTOTAL_VENDES_MES;
+
+      IF (vTOTAL_VENDES_MES IS NULL) THEN
+        vTOTAL_VENDES_MES = 0;
+
+      -- Assign to each month field
+      IF (vContador = 1) THEN fldTOTAL_VENDES_MES_A = vTOTAL_VENDES_MES;
+      IF (vContador = 2) THEN fldTOTAL_VENDES_MES_B = vTOTAL_VENDES_MES;
+      IF (vContador = 3) THEN fldTOTAL_VENDES_MES_C = vTOTAL_VENDES_MES;
+      IF (vContador = 4) THEN fldTOTAL_VENDES_MES_D = vTOTAL_VENDES_MES;
+      IF (vContador = 5) THEN fldTOTAL_VENDES_MES_E = vTOTAL_VENDES_MES;
+      IF (vContador = 6) THEN fldTOTAL_VENDES_MES_F = vTOTAL_VENDES_MES;
+      IF (vContador = 7) THEN fldTOTAL_VENDES_MES_G = vTOTAL_VENDES_MES;
+      IF (vContador = 8) THEN fldTOTAL_VENDES_MES_H = vTOTAL_VENDES_MES;
+      IF (vContador = 9) THEN fldTOTAL_VENDES_MES_I = vTOTAL_VENDES_MES;
+      IF (vContador = 10) THEN fldTOTAL_VENDES_MES_J = vTOTAL_VENDES_MES;
+      IF (vContador = 11) THEN fldTOTAL_VENDES_MES_K = vTOTAL_VENDES_MES;
+      IF (vContador = 12) THEN fldTOTAL_VENDES_MES_L = vTOTAL_VENDES_MES;
+      IF (vContador = 13) THEN fldTOTAL_VENDES_MES_M = vTOTAL_VENDES_MES;
+
+      vMes = vMes +1;
+      IF (vMes > 12) THEN BEGIN vMes = 1; vAnyo = vAnyo +1; END
+    END
+    
+    SUSPEND;
+
+    WHEN ANY DO
+    BEGIN
+      fldCODI_ARTICLE = pCodiArticle;
+      fldNUM_FARMACIA = vNumFarmacia;
+      fldTOTAL_VENDES_MES_A = 0;
+      fldTOTAL_VENDES_MES_B = 0;
+      fldTOTAL_VENDES_MES_C = 0;
+      fldTOTAL_VENDES_MES_D = 0;
+      fldTOTAL_VENDES_MES_E = 0;
+      fldTOTAL_VENDES_MES_F = 0;
+      fldTOTAL_VENDES_MES_G = 0;
+      fldTOTAL_VENDES_MES_H = 0;
+      fldTOTAL_VENDES_MES_I = 0;
+      fldTOTAL_VENDES_MES_J = 0;
+      fldTOTAL_VENDES_MES_K = 0;
+      fldTOTAL_VENDES_MES_L = 0;
+      fldTOTAL_VENDES_MES_M = 0;
+      fldP_REFERENCIA = 0;
+      fldP_PVP = 0;
+      fldSTOCK = 0;
+      fldERROR_CNN = 1;
+      SUSPEND;
+    END
+  END
+END
+^
+
+SET TERM ;^</code></pre>
+
+<hr>
+
+<h2>Chapter 4: Remote Price Update Example</h2>
+<p>This example shows how a procedure can <strong>update prices across multiple remote branches</strong>, enforcing unified PVP/PVA values.</p>
+<pre><code>SET TERM ^;
+
+CREATE OR ALTER PROCEDURE RMT_ACTUALIZAR_PRECIOS
+(
+  pCodigoArticulo VARCHAR(6),
+  pNuevoPVP DOUBLE PRECISION,
+  pIPRemotaFDB VARCHAR(100)
+)
+AS
+  DECLARE VARIABLE lcComando VARCHAR(8192);
+BEGIN
+  lcComando =
+    'UPDATE ARTICULOS' ||
+    '   SET PVP = ' || pNuevoPVP ||
+    ' WHERE CODIGO_ARTICULO = :pCodigoArticulo';
+
+  EXECUTE STATEMENT lcComando
+    ON EXTERNAL pIPRemotaFDB
+    AS USER 'SYSDBA' PASSWORD 'masterkey';
+
+  WHEN ANY DO
+  BEGIN
+    -- Handle error here if needed
+    SUSPEND;
+  END
+END
+^
+
+SET TERM ;^</code></pre>
+
+<div class="footer">
+  🌐 <strong>The Verdú Method</strong> — Official Technical Document<br>
+  © 2025 Salvador Verdú. All rights reserved.<br>
+  <a href="https://github.com/olbeup" target="_blank">@olbeup</a> • Santiago de la Ribera, Murcia, Spain<br>
+  🇪🇸 <a href="index.html">Versión en español</a>
+</div>
+
+</div>
+</body>
+</html>
