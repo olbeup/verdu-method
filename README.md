@@ -20,3 +20,8 @@ EXECUTE STATEMENT 'SELECT ...'
   ON EXTERNAL '114.22.xxx.xxx:C:\ruta\base.fdb'
   AS USER 'SYSDBA' PASSWORD 'masterkey'
   INTO :var1, :var2;
+
+🚀 [Demostración en vivo](https://olbeup.github.io/verdu-method) · 
+📄 [Ejemplos completos](https://github.com/olbeup/verdu-method/tree/main/) · 
+🐛 [Reporta un issue](https://github.com/olbeup/verdu-method/issues/new) · 
+⭐ ¡Deja tu star si te salva la vida con Firebird!
